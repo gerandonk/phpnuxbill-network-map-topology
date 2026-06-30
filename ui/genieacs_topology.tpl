@@ -10,6 +10,7 @@
 .connection-online { stroke-dasharray: 8 4; animation: dash-run 0.8s linear infinite; }
 .connection-offline { stroke-dasharray: 8 4; animation: dash-run 1.2s linear infinite; }
 .connection-unknown { stroke-dasharray: 4 4; animation: dash-run 1.5s linear infinite; }
+.connection-p2p { stroke-dasharray: 12 6; animation: dash-run 1s linear infinite; }
 {/literal}</style>
 
 <div class="row">
@@ -279,7 +280,10 @@ function loadMap(data) {
             }
             if (pm) {
                 var cs = 'unknown', clr = '#6b7280', w = 4;
-                if (pm.itemData.status === 'online' && item.status === 'online') { cs = 'online'; clr = '#10b981'; w = 4; }
+                // Server-to-server P2P connection
+                if (pm.itemData.item_type === 'server' && item.item_type === 'server') {
+                    clr = '#e83e8c'; w = 5; cs = 'p2p';
+                } else if (pm.itemData.status === 'online' && item.status === 'online') { cs = 'online'; clr = '#10b981'; w = 4; }
                 else if (pm.itemData.status === 'offline' || item.status === 'offline') { cs = 'offline'; clr = '#ef4444'; w = 4; }
                 var coords = [pm.getLatLng(), markers[item.id].getLatLng()];
                 var p = L.polyline(coords, { color: clr, weight: w, opacity: 0.9, className: 'connection-' + cs }).addTo(map);
@@ -525,6 +529,7 @@ function updateItemForm(type) {
     var h = '';
 
     if (type === 'server') {
+        h += field('Parent Server', '<select name="parent_id" class="form-control"><option value="">No Parent</option>' + serverOnlyOptions() + '</select>');
         h += field('ISP Link', '<input type="text" name="isp_link" class="form-control" placeholder="e.g. 10.0.0.1">');
         h += field('MikroTik Device', '<input type="text" name="mikrotik_device_id" class="form-control" placeholder="GenieACS device ID">');
         h += field('OLT Link', '<input type="text" name="olt_link" class="form-control" placeholder="e.g. 10.0.0.2">');
@@ -621,6 +626,13 @@ function updateItemForm(type) {
 }
 
 function serverOptions() {
+    var h = '';
+    allMapItems.forEach(function(i) { if (i.item_type === 'server') h += '<option value="' + i.id + '">' + i.name + '</option>'; });
+    return h;
+}
+
+function serverOnlyOptions() {
+    // For server-to-server parent selection
     var h = '';
     allMapItems.forEach(function(i) { if (i.item_type === 'server') h += '<option value="' + i.id + '">' + i.name + '</option>'; });
     return h;
@@ -783,32 +795,179 @@ function editItemClick(id) {
             function r2(h) { return '<table style="width:100%"><tr>' + h + '</tr></table>'; }
             function f2(l, i) { return r2(td + l + td2 + i + '</td>'); }
             var h = '';
-            if (item.item_type === 'olt') {
+            var type = item.item_type;
+            if (type === 'server') {
+                h += f2('Parent Server', '<select name="parent_id" class="form-control"><option value="">No Parent</option>' + serverOnlyOptions() + '</select>');
+                df.innerHTML = h;
+                if (item.parent_id) { var sel = document.querySelector('[name="parent_id"]'); if (sel) sel.value = item.parent_id; }
+            } else if (type === 'olt') {
                 var cfg = item.config || {};
+                h += f2('Parent Server', '<select name="parent_id" class="form-control"><option value="">No Parent</option>' + serverOptions() + '</select>');
                 h += f2('Output Power', '<input type="number" step="0.01" name="output_power" class="form-control" value="' + (cfg.output_power || 2) + '">');
+                h += f2('PON Port Count', '<input type="number" name="pon_count" class="form-control" value="' + (cfg.pon_count || 1) + '" min="1" max="16" onchange="editGenerateOltPonFields(this.value, ' + id + ')">');
+                h += '<div id="edit-olt-pon-power-container"></div>';
                 h += f2('Attenuation', '<input type="number" step="0.01" name="attenuation_db" class="form-control" value="' + (cfg.attenuation_db || 0) + '">');
                 h += f2('OLT Link', '<input type="text" name="olt_link" class="form-control" value="' + (cfg.olt_link || '') + '">');
-            } else if (item.item_type === 'odc') {
+                df.innerHTML = h;
+                // Fill parent
+                if (item.parent_id) { var sel = document.querySelector('[name="parent_id"]'); if (sel) sel.value = item.parent_id; }
+                editGenerateOltPonFields(cfg.pon_count || 1, id);
+            } else if (type === 'odc') {
                 var cfg = item.config || {};
+                h += f2('Parent PON Port', '<select name="olt_pon_port_id" class="form-control"><option value="">Select PON Port</option></select>');
                 h += f2('Port Count', '<input type="number" name="port_count" class="form-control" value="' + (cfg.port_count || 4) + '">');
-            } else if (item.item_type === 'odp') {
+                df.innerHTML = h;
+                $.get('?_route=plugin/genieacs_topology_api&action=get_pon_ports', function(r2) {
+                    if (r2 && r2.success) {
+                        var sel = document.querySelector('[name="olt_pon_port_id"]');
+                        var opt = '<option value="">Select PON Port</option>';
+                        r2.ports.forEach(function(p) {
+                            var selected = (p.id == cfg.olt_pon_port_id) ? ' selected' : '';
+                            var disabled = p.is_used && (p.id != cfg.olt_pon_port_id) ? ' disabled' : '';
+                            opt += '<option value="' + p.id + '"' + selected + disabled + '>' + p.olt_name + ' - PON ' + p.pon_number + ' (' + p.output_power + ' dBm)' + (p.is_used ? ' (Used)' : '') + '</option>';
+                        });
+                        sel.innerHTML = opt;
+                    }
+                });
+            } else if (type === 'odp') {
                 var cfg = item.config || {};
-                h += f2('ODC Port', '<input type="number" name="odc_port" class="form-control" value="' + (cfg.odc_port || '') + '">');
-                h += f2('Port Count', '<input type="number" name="port_count" class="form-control" value="' + (cfg.port_count || 8) + '">');
-                h += f2('Use Splitter', '<select name="use_splitter" class="form-control"><option value="0"' + (cfg.use_splitter == 0 ? ' selected' : '') + '>No</option><option value="1"' + (cfg.use_splitter == 1 ? ' selected' : '') + '>Yes</option></select>');
-                h += f2('Splitter Ratio', '<input type="text" name="splitter_ratio" class="form-control" value="' + (cfg.splitter_ratio || '1:8') + '">');
-            } else if (item.item_type === 'onu') {
-                h += f2('Customer Name', '<input type="text" name="customer_name" class="form-control" value="' + (item.config && item.config.customer_name || '') + '">');
-                h += '<div class="alert alert-info" style="margin:8px 0">Device and ODP cannot be changed. Delete and recreate if needed.</div>';
-            } else if (item.item_type === 'switch' || item.item_type === 'htb') {
+                var selParent = item.parent_id || '';
+                h += f2('Parent (ODC/ODP)', '<select name="parent_id" id="edit-odp-parent-select" class="form-control" onchange="editLoadODPPortOptions(this.value)"><option value="">Select Parent</option>' + odcOptions() + '</select>');
+                h += '<div id="edit-odc-port-group" style="display:' + (selParent && allMapItems.find(function(i){return i.id==selParent&&i.item_type==='odc'}) ? 'block' : 'none') + '">' + r2(td + 'ODC Port' + td2 + '<select name="odc_port" class="form-control"><option value="">Select port</option></select></td>') + '</div>';
+                h += f2('Port Count', '<select name="port_count" class="form-control"><option value="4"' + (cfg.port_count==4?' selected':'') + '>4 Port / 1:4</option><option value="8"' + (cfg.port_count==8?' selected':'') + '>8 Port / 1:8</option><option value="16"' + (cfg.port_count==16?' selected':'') + '>16 Port / 1:16</option></select>');
+                h += f2('Use Splitter', '<select name="use_splitter" class="form-control" onchange="editToggleSplitter(this.value)"><option value="0"' + (cfg.use_splitter==0?' selected':'') + '>No</option><option value="1"' + (cfg.use_splitter==1?' selected':'') + '>Yes</option></select>');
+                h += '<div id="edit-splitter-group" style="display:' + (cfg.use_splitter==1?'block':'none') + '">' + f2('Splitter Ratio', '<select name="splitter_ratio" class="form-control"><option value="1:2"' + ((cfg.splitter_ratio||'')=='1:2'?' selected':'') + '>1:2</option><option value="1:4"' + ((cfg.splitter_ratio||'')=='1:4'?' selected':'') + '>1:4</option><option value="1:8"' + ((cfg.splitter_ratio||'')=='1:8'?' selected':'') + '>1:8</option><option value="1:16"' + ((cfg.splitter_ratio||'')=='1:16'?' selected':'') + '>1:16</option><option value="1:32"' + ((cfg.splitter_ratio||'')=='1:32'?' selected':'') + '>1:32</option><option value="20:80"' + ((cfg.splitter_ratio||'')=='20:80'?' selected':'') + '>20:80</option><option value="30:70"' + ((cfg.splitter_ratio||'')=='30:70'?' selected':'') + '>30:70</option><option value="50:50"' + ((cfg.splitter_ratio||'')=='50:50'?' selected':'') + '>50:50</option></select>') + '</div>';
+                df.innerHTML = h;
+                if (selParent) { var sel = document.querySelector('[name="parent_id"]'); if (sel) sel.value = selParent; }
+                if (selParent && allMapItems.find(function(i){return i.id==selParent&&i.item_type==='odc'})) { editLoadODPPortOptions(selParent); }
+            } else if (type === 'onu') {
                 var cfg = item.config || {};
                 h += f2('Customer Name', '<input type="text" name="customer_name" class="form-control" value="' + (cfg.customer_name || '') + '">');
-                h += f2('Port Count', '<input type="number" name="port_count" class="form-control" value="' + (cfg.port_count || 4) + '">');
+                h += r2(td + 'GenieACS Device' + td2 + '<select name="genieacs_device_id" class="form-control" onchange="onOnuDeviceChange(this)"><option value="">' + (item.genieacs_device_id || 'Select device') + '</option></select>' + '</td>');
+                h += r2(td + 'Parent' + td2 + '<select name="parent_id" class="form-control" onchange="editOnuParentChange(this)"><option value="">Select Parent</option></select>' + '</td>' + td + 'ODP Port' + td2 + '<select name="odp_port" class="form-control" style="display:none"><option value="">Select ODP first</option></select>' + '</td>');
+                df.innerHTML = h;
+                // Load devices
+                $.get('?_route=plugin/genieacs_topology_api&action=get_available_devices', function(r2) {
+                    if (r2 && r2.success) {
+                        var sel = document.querySelector('[name="genieacs_device_id"]');
+                        var curId = item.genieacs_device_id || '';
+                        var custGroup = '<optgroup label="Customers">';
+                        var devGroup = '<optgroup label="GenieACS Devices">';
+                        r2.devices.forEach(function(d) {
+                            var label = d.is_customer ? d.serial_number + ' (' + d.pppoe_username + ')' : d.serial_number + ' (' + d.pppoe_username + ', ' + d.status + ')';
+                            var selected = (d.device_id === curId) ? ' selected' : '';
+                            if (d.is_customer) custGroup += '<option value="' + d.device_id + '" data-is-customer="1"' + selected + '>' + label + '</option>';
+                            else devGroup += '<option value="' + d.device_id + '"' + selected + '>' + label + '</option>';
+                        });
+                        custGroup += '</optgroup>'; devGroup += '</optgroup>';
+                        sel.innerHTML += custGroup + devGroup;
+                    }
+                });
+                // Load parents
+                $.get('?_route=plugin/genieacs_topology_api&action=get_parents', function(r2) {
+                    if (r2 && r2.success) {
+                        var sel = document.querySelector('[name="parent_id"]');
+                        var groups = {};
+                        r2.items.forEach(function(it) {
+                            var t = it.item_type.charAt(0).toUpperCase() + it.item_type.slice(1);
+                            if (!groups[t]) groups[t] = '';
+                            var label = it.name;
+                            if (it.port_count !== undefined) {
+                                var avail = it.port_count - it.used_count;
+                                label += ' (' + avail + '/' + it.port_count + ' available)';
+                            }
+                            groups[t] += '<option value="' + it.id + '" data-type="' + it.item_type + '">' + label + '</option>';
+                        });
+                        var order = ['Odp', 'Switch', 'Htb'];
+                        order.forEach(function(g) {
+                            if (groups[g]) { sel.innerHTML += '<optgroup label="' + g + '">' + groups[g] + '</optgroup>'; }
+                        });
+                        if (item.parent_id) { sel.value = item.parent_id; editOnuParentChange(sel); }
+                    }
+                });
+            } else if (type === 'switch' || type === 'htb') {
+                var cfg = item.config || {};
+                h += f2('Customer Name', '<input type="text" name="customer_name" class="form-control" value="' + (cfg.customer_name || '') + '">');
+                h += f2('Parent', '<select name="parent_id" class="form-control"><option value="">Select Parent</option>' + allParentOptions() + '</select>');
+                h += f2('Port Count', '<input type="number" name="port_count" class="form-control" value="' + (cfg.port_count || 4) + '" min="0" max="48">');
+                df.innerHTML = h;
+                if (item.parent_id) { var sel = document.querySelector('[name="parent_id"]'); if (sel) sel.value = item.parent_id; }
+            } else {
+                df.innerHTML = '';
             }
-            df.innerHTML = h;
             $('#editItemModal').modal('show');
         }
     });
+}
+
+function editGenerateOltPonFields(count, itemId) {
+    var item = allMapItems.find(function(i) { return i.id == itemId; });
+    var cfg = item && item.config || {};
+    var ponPorts = cfg.pon_ports || {};
+    var c = document.getElementById('edit-olt-pon-power-container');
+    c.innerHTML = '';
+    var td = '<td style="width:140px;padding:4px 8px 4px 0;vertical-align:middle;white-space:nowrap"><label style="margin:0">';
+    var td2 = '</label></td><td style="padding:4px 0">';
+    for (var i = 1; i <= parseInt(count); i++) {
+        var val = ponPorts[i] || '9.00';
+        c.innerHTML += '<table style="width:100%"><tr>' + td + 'Port ' + i + ' Power' + td2 + '<input type="number" step="0.01" name="pon_power_' + i + '" class="form-control" value="' + val + '"></td></tr></table>';
+    }
+}
+
+function editLoadODPPortOptions(parentId) {
+    if (!parentId) return;
+    var sel = document.querySelector('[name="odc_port"]');
+    var parentItem = allMapItems.find(function(i) { return i.id == parentId; });
+    if (parentItem && parentItem.item_type === 'odc') {
+        document.getElementById('edit-odc-port-group').style.display = 'block';
+        $.get('?_route=plugin/genieacs_topology_api&action=get_used_ports&parent_id=' + parentId + '&parent_type=odc', function(r) {
+            var used = (r && r.success) ? r.used_ports : [];
+            var pc = (parentItem.config && parentItem.config.port_count) || 4;
+            var h = '<option value="">Select port</option>';
+            for (var i = 1; i <= pc; i++) {
+                if (used.indexOf(i) >= 0) h += '<option value="' + i + '" disabled>Port ' + i + ' (Used)</option>';
+                else h += '<option value="' + i + '">Port ' + i + '</option>';
+            }
+            sel.innerHTML = h;
+            // Preselect current value from item
+            var curItem = allMapItems.find(function(it) { return it.id == parentId; });
+            // Load current odp config
+            $.get('?_route=plugin/genieacs_topology_api&action=get_item_detail&item_id=' + parentId, function(r2) {
+                if (r2 && r2.success && r2.item && r2.item.config) {
+                    sel.value = r2.item.config.odc_port || '';
+                }
+            });
+        });
+    } else {
+        document.getElementById('edit-odc-port-group').style.display = 'none';
+    }
+}
+
+function editToggleSplitter(val) {
+    document.getElementById('edit-splitter-group').style.display = val === '1' ? 'block' : 'none';
+}
+
+function editOnuParentChange(sel) {
+    var odpPort = document.querySelector('[name="odp_port"]');
+    var option = sel.options[sel.selectedIndex];
+    var type = option ? option.getAttribute('data-type') : '';
+    if (type === 'odp') {
+        odpPort.style.display = 'block';
+        $.get('?_route=plugin/genieacs_topology_api&action=get_odp_ports', function(r) {
+            if (r && r.success) {
+                var odp = r.odp_list.find(function(o) { return o.id == sel.value; });
+                if (odp) {
+                    odpPort.innerHTML = '<option value="">Select port</option>';
+                    odp.available_ports.forEach(function(p) { odpPort.innerHTML += '<option value="' + p + '">Port ' + p + '</option>'; });
+                    // Try to preselect current odp_port
+                    var curItem = allMapItems.find(function(i) { return i.id == sel.value; });
+                }
+            }
+        });
+    } else {
+        odpPort.style.display = 'none';
+        odpPort.value = '';
+    }
 }
 
 function updateItem() {
@@ -826,9 +985,11 @@ function updateItem() {
         dataType: 'json',
         success: function(r) {
             if (r && r.success) { $('#editItemModal').modal('hide'); refreshMap(); showToast('Item updated', 'success'); }
-            else { showToast('Failed to update', 'danger'); }
+            else { showToast(r && r.message || 'Failed to update', 'danger'); }
         },
-        error: function() { showToast('Failed to update', 'danger'); }
+        error: function(xhr, status, error) {
+            showToast('AJAX error: ' + status, 'danger');
+        }
     });
 }
 

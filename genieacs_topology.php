@@ -833,7 +833,7 @@ function genieacs_topology_api()
             $item->genieacs_device_id = $data['genieacs_device_id'] ?? null;
             $item->status = 'unknown';
 
-            // Properties for server
+            // Properties
             $props = [];
             if ($itemType === 'server') {
                 if (!empty($data['isp_link'])) $props['isp_link'] = $data['isp_link'];
@@ -996,26 +996,85 @@ function genieacs_topology_api()
                 break;
             }
 
+            $oldParentId = $item->parent_id;
+            $changedParent = false;
+
             if (!empty($data['name'])) $item->name = $data['name'];
             if (!empty($data['latitude'])) $item->latitude = (float)$data['latitude'];
             if (!empty($data['longitude'])) $item->longitude = (float)$data['longitude'];
+            if (array_key_exists('parent_id', $data)) {
+                $newParent = $data['parent_id'] !== '' ? (int)$data['parent_id'] : null;
+                $item->parent_id = $newParent;
+                $changedParent = ($oldParentId != $newParent);
+            }
+            if (array_key_exists('genieacs_device_id', $data)) {
+                $item->genieacs_device_id = $data['genieacs_device_id'] ?: null;
+            }
             $item->save();
 
             $itemType = $item->item_type;
             switch ($itemType) {
+                case 'server':
+                    // parent_id already handled above
+                    if (isset($data['isp_link']) || isset($data['mikrotik_device_id']) || isset($data['olt_link'])) {
+                        $props = json_decode($item->properties ?: '{}', true);
+                        if (isset($data['isp_link'])) $props['isp_link'] = $data['isp_link'];
+                        if (isset($data['mikrotik_device_id'])) $props['mikrotik_device_id'] = $data['mikrotik_device_id'];
+                        if (isset($data['olt_link'])) $props['olt_link'] = $data['olt_link'];
+                        $item->properties = json_encode($props);
+                        $item->save();
+                    }
+                    break;
                 case 'olt':
                     $cfg = ORM::for_table('olt_config')->where('map_item_id', $id)->find_one();
                     if ($cfg) {
                         if (isset($data['output_power'])) $cfg->output_power = (float)$data['output_power'];
                         if (isset($data['attenuation_db'])) $cfg->attenuation_db = (float)$data['attenuation_db'];
                         if (isset($data['olt_link'])) $cfg->olt_link = $data['olt_link'];
+                        if (isset($data['pon_count'])) $cfg->pon_count = (int)$data['pon_count'];
                         $cfg->save();
+                    }
+                    // Update PON port powers
+                    if (isset($data['pon_count'])) {
+                        $ponCount = (int)$data['pon_count'];
+                        for ($i = 1; $i <= $ponCount; $i++) {
+                            $key = "pon_power_{$i}";
+                            if (isset($data[$key])) {
+                                $pp = ORM::for_table('olt_pon_ports')->where('olt_item_id', $id)->where('pon_number', $i)->find_one();
+                                if ($pp) {
+                                    $pp->output_power = (float)$data[$key];
+                                    $pp->save();
+                                }
+                            }
+                        }
                     }
                     break;
                 case 'odc':
                     $cfg = ORM::for_table('odc_config')->where('map_item_id', $id)->find_one();
                     if ($cfg) {
                         if (isset($data['port_count'])) $cfg->port_count = (int)$data['port_count'];
+                        if (isset($data['olt_pon_port_id'])) {
+                            $cfg->olt_pon_port_id = $data['olt_pon_port_id'] !== '' ? (int)$data['olt_pon_port_id'] : null;
+                            $cfg->server_pon_port = $cfg->olt_pon_port_id;
+                            // Recalculate parent_id from PON port
+                            $ponPortId = $cfg->olt_pon_port_id;
+                            $parentId = null;
+                            if ($ponPortId) {
+                                $oltPp = ORM::for_table('olt_pon_ports')->find_one($ponPortId);
+                                if ($oltPp) {
+                                    $parentId = $oltPp->olt_item_id;
+                                    $cfg->calculated_power = (float)$oltPp->output_power;
+                                } else {
+                                    $srvPp = ORM::for_table('server_pon_ports')->find_one($ponPortId);
+                                    if ($srvPp) {
+                                        $parentId = $srvPp->map_item_id;
+                                        $cfg->calculated_power = (float)$srvPp->output_power;
+                                    }
+                                }
+                            }
+                            $item->parent_id = $parentId;
+                            $item->save();
+                        }
                         $cfg->save();
                     }
                     break;
@@ -1023,9 +1082,14 @@ function genieacs_topology_api()
                     $cfg = ORM::for_table('odp_config')->where('map_item_id', $id)->find_one();
                     if ($cfg) {
                         if (isset($data['odc_port'])) $cfg->odc_port = (int)$data['odc_port'];
+                        if (isset($data['parent_odp_port'])) $cfg->parent_odp_port = $data['parent_odp_port'] ?: null;
                         if (isset($data['port_count'])) $cfg->port_count = (int)$data['port_count'];
                         if (isset($data['use_splitter'])) $cfg->use_splitter = (int)$data['use_splitter'];
                         if (isset($data['splitter_ratio'])) $cfg->splitter_ratio = $data['splitter_ratio'];
+                        if (isset($data['custom_ratio_output_port'])) $cfg->custom_ratio_output_port = $data['custom_ratio_output_port'] ?: null;
+                        if (isset($data['use_secondary_splitter'])) $cfg->use_secondary_splitter = (int)$data['use_secondary_splitter'];
+                        if (isset($data['secondary_splitter_ratio'])) $cfg->secondary_splitter_ratio = $data['secondary_splitter_ratio'] ?: null;
+                        if (isset($data['custom_secondary_ratio_output_port'])) $cfg->custom_secondary_ratio_output_port = $data['custom_secondary_ratio_output_port'] ?: null;
                         $cfg->save();
                     }
                     break;
@@ -1033,6 +1097,46 @@ function genieacs_topology_api()
                     $cfg = ORM::for_table('onu_config')->where('map_item_id', $id)->find_one();
                     if ($cfg) {
                         if (isset($data['customer_name'])) $cfg->customer_name = $data['customer_name'];
+                        if (isset($data['genieacs_device_id'])) $cfg->genieacs_device_id = $data['genieacs_device_id'] ?: null;
+                        if (array_key_exists('odp_port', $data)) {
+                            $oldOdpPort = $cfg->odp_port;
+                            $newOdpPort = $data['odp_port'] !== '' ? (int)$data['odp_port'] : null;
+                            // Free old ODP port
+                            if ($oldOdpPort && $oldParentId) {
+                                $oldParentItem = ORM::for_table('map_items')->find_one($oldParentId);
+                                if ($oldParentItem && $oldParentItem->item_type === 'odp') {
+                                    $odpCfg = ORM::for_table('odp_config')->where('map_item_id', $oldParentItem->id)->find_one();
+                                    if ($odpCfg) {
+                                        $rx = json_decode($odpCfg->port_rx_power ?: '{}', true);
+                                        unset($rx[$oldOdpPort]);
+                                        $odpCfg->port_rx_power = json_encode($rx);
+                                        $odpCfg->save();
+                                    }
+                                }
+                            }
+                            // Claim new ODP port
+                            if ($newOdpPort && $item->parent_id) {
+                                $newParentItem = ORM::for_table('map_items')->find_one($item->parent_id);
+                                if ($newParentItem && $newParentItem->item_type === 'odp') {
+                                    $odpCfg = ORM::for_table('odp_config')->where('map_item_id', $newParentItem->id)->find_one();
+                                    if ($odpCfg) {
+                                        $rx = json_decode($odpCfg->port_rx_power ?: '{}', true);
+                                        $rx[$newOdpPort] = '-25.00';
+                                        $odpCfg->port_rx_power = json_encode($rx);
+                                        $odpCfg->save();
+                                    }
+                                }
+                            }
+                            $cfg->odp_port = $newOdpPort;
+                        }
+                        $cfg->save();
+                    } else if (isset($data['customer_name'])) {
+                        // Create if not exists
+                        $cfg = ORM::for_table('onu_config')->create();
+                        $cfg->map_item_id = $id;
+                        $cfg->customer_name = $data['customer_name'];
+                        $cfg->genieacs_device_id = $data['genieacs_device_id'] ?? null;
+                        $cfg->odp_port = !empty($data['odp_port']) ? (int)$data['odp_port'] : null;
                         $cfg->save();
                     }
                     break;
