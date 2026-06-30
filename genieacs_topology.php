@@ -15,7 +15,7 @@
 
 require_once 'genieacs.php';
 
-register_menu("Network Map", true, "genieacs_topology", 'AFTER_PLANS', 'glyphicon glyphicon-globe', '', '', ['SuperAdmin', 'Admin']);
+register_menu("Network Map", true, "genieacs_topology", 'AFTER_PLANS', 'glyphicon glyphicon-globe', 'Free Version', 'yellow', ['SuperAdmin', 'Admin']);
 
 function genieacs_topology_create_tables()
 {
